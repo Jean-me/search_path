@@ -141,6 +141,14 @@ char *search_path(const char *filename)
     }
     return (NULL);
 }
+
+int exe(char *path)
+{
+    char *args[] = {path, NULL, NULL};
+    execve(path, args, NULL);
+    return (0);
+}
+
 int main(int argc, char *argv[])
 {
     if (argc != 2)
@@ -153,6 +161,7 @@ int main(int argc, char *argv[])
     if (path)
     {
         printf("Found executable at: %s\n", path);
+        exe(path);
         free(path);
     }
     else
