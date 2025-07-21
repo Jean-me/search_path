@@ -18,8 +18,7 @@ enum e_token_kind
     TK_RESERVED,
     TK_OP,
     TK_EOF,
-};
-typedef enum e_token_kind t_token_kind;
+} typedef t_token_kind;
 
 struct s_token
 {
@@ -28,12 +27,53 @@ struct s_token
     struct s_token *next;
 } typedef t_token;
 
+enum e_node_kind
+{
+    ND_SIMPLE_CMD,
+} typedef t_node_kind;
+
 struct s_node
 {
-    t_token *tok;        // トークンのリスト
-    char **argv;         // コマンドの引数
-    struct s_node *next; // 次のノードへのポインタ
+    t_token *args;
+    t_node_kind kind;
+    t_node *next;
 } typedef t_node;
+
+bool at_eof(t_token *tok) // トークンがkind:TK_EOFかどうかを確認
+{
+    return (tok->kind == TK_EOF);
+}
+
+t_node *new_node(t_node_kind kind) // nodeの種類を指定して新しいノードを作成
+{
+    t_node *node;
+
+    node = calloc(1, sizeof(*node));
+    if (node == NULL)
+        fatal_error("calloc");
+    node->kind = kind;
+    return (node);
+}
+
+t_token *tokdup(t_token *tok)
+{
+    char *word;
+
+    word = strdup(tok->word);
+    if (word == NULL)
+        fatal_error("strdup");
+    return (new_token(word, tok->kind));
+}
+
+void append_tok(t_token **tokens, t_token *tok)
+{
+    if (*tokens == NULL)
+    {
+        *tokens = tok;
+        return;
+    }
+    append_tok(&(*tokens)->next, tok);
+}
 
 void fatal_error(const char *msg)
 {
@@ -387,32 +427,19 @@ void free_argv(char **argv)
 
 t_node *parse(t_token *tok)
 {
-    t_node *head = NULL;
-    t_node *current = NULL;
+    t_node *node;
 
-    while (tok)
+    node = new_node(ND_SIMPLE_CMD);
+    while (tok && !at_eof(tok))
     {
-        // 新しいノードを作成
-        t_node *new_node = malloc(sizeof(t_node));
-        if (!new_node)
-            fatal_error("malloc");
-        new_node->tok = tok;
-        new_node->argv = token_list_to_argv(tok);
-        new_node->next = NULL;
-
-        // リストに追加
-        if (!head)
-            head = new_node;
+        if (tok->kind == TK_WORD)
+            append_tok(&node->args, tokdup(tok));
         else
-            current->next = new_node;
-        current = new_node;
-
-        // 次のトークンへ
+            todo("Implement parser");
         tok = tok->next;
     }
-    return head;
+    return (node);
 }
-
 void interpret(char *line, int *stat_loc) // ここ！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
 {
     t_token *tok = tokenize(line);
