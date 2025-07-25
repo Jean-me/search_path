@@ -96,7 +96,7 @@ bool startswith(const char *s, const char *keyword)
 
 bool is_operator(const char *s)
 {
-    static char *const operators[] = {"||", "&&", "&", ";;", ";", "(", ")", "|"};
+    static char *const operators[] = {"||", "&&", ">>", "&", ";;", ";", "(", ")", "|", ">", "<"};
     size_t i;
     i = 0;
 
@@ -126,9 +126,10 @@ bool is_quote(char c)
 
 t_token *operator(char **rest, char *line)
 {
-    static char *const operators[] = {"||", "&&", "&", ";;", ";", "(", ")", "|"};
+    static char *const operators[] = {"||", "&&", ">>", "&", ";;", ";", "(", ")", "|", ">", "<"};
     size_t i;
     char *op;
+    t_token_kind kind;
     i = 0;
 
     while (i < sizeof(operators) / sizeof(*operators))
@@ -139,7 +140,18 @@ t_token *operator(char **rest, char *line)
             if (op == NULL)
                 fatal_error("strdup");
             *rest = line + strlen(op);
-            return (new_token(op, TK_OP));
+
+            // リダイレクション演算子の場合は適切なトークンタイプを設定
+            if (strcmp(op, ">>") == 0)
+                kind = TK_REDIRECT_APPEND;
+            else if (strcmp(op, ">") == 0)
+                kind = TK_REDIRECT_OUT;
+            else if (strcmp(op, "<") == 0)
+                kind = TK_REDIRECT_IN;
+            else
+                kind = TK_OP; // その他の演算子はTK_OPとして扱う
+
+            return (new_token(op, kind));
         }
         i++;
     }
@@ -388,16 +400,93 @@ void free_argv(char **argv)
     free(argv);
 }
 
+// リダイレクションノードを作成する関数
+t_redirect *new_redirect(t_node_kind type, char *filename, int fd)
+{
+    t_redirect *redirect = malloc(sizeof(t_redirect));
+    if (!redirect)
+        fatal_error("malloc");
+
+    redirect->type = type;
+    redirect->filename = strdup(filename);
+    if (!redirect->filename)
+        fatal_error("strdup");
+    redirect->next = NULL;
+    redirect->fd = fd;
+
+    return redirect;
+}
+
+// リダイレクションをノードに追加する関数
+void append_redirect(t_node *node, t_redirect *redirect)
+{
+    if (!node->redirects)
+    {
+        node->redirects = redirect;
+        return;
+    }
+
+    t_redirect *current = node->redirects;
+    while (current->next)
+        current = current->next;
+    current->next = redirect;
+}
+
 // 単純コマンドのみをパースする関数
 t_node *parse_simple_command(t_token **tok_ptr)
 {
     t_node *node = new_node(ND_SIMPLE_CMD);
     t_token *tok = *tok_ptr;
 
-    while (tok && !at_eof(tok) && tok->kind == TK_WORD)
+    while (tok && !at_eof(tok))
     {
-        append_tok(&node->args, tokdup(tok));
-        tok = tok->next;
+        if (tok->kind == TK_WORD)
+        {
+            append_tok(&node->args, tokdup(tok));
+            tok = tok->next;
+        }
+        else if (tok->kind == TK_REDIRECT_IN || tok->kind == TK_REDIRECT_OUT || tok->kind == TK_REDIRECT_APPEND)
+        {
+            // リダイレクション演算子の処理
+            t_node_kind redirect_type;
+            int default_fd;
+
+            if (tok->kind == TK_REDIRECT_IN)
+            {
+                redirect_type = ND_REDIRECT_IN;
+                default_fd = 0; // 標準入力
+            }
+            else if (tok->kind == TK_REDIRECT_OUT)
+            {
+                redirect_type = ND_REDIRECT_OUT;
+                default_fd = 1; // 標準出力
+            }
+            else
+            {
+                redirect_type = ND_REDIRECT_APPEND;
+                default_fd = 1; // 標準出力
+            }
+
+            tok = tok->next; // リダイレクション演算子をスキップ
+
+            // 次のトークンがファイル名でなければエラー
+            if (!tok || tok->kind != TK_WORD)
+            {
+                fprintf(stderr, "Error: Expected filename after redirection\n");
+                *tok_ptr = tok;
+                return node;
+            }
+
+            // リダイレクションを追加
+            t_redirect *redirect = new_redirect(redirect_type, tok->word, default_fd);
+            append_redirect(node, redirect);
+
+            tok = tok->next; // ファイル名をスキップ
+        }
+        else
+        {
+            break; // その他のトークンは終了
+        }
     }
     *tok_ptr = tok;
     return node;
@@ -482,6 +571,36 @@ void print_node_debug(t_node *node)
             arg_count++;
         }
         printf("Total arguments: %d\n", arg_count);
+
+        // リダイレクション情報を表示
+        if (node->redirects)
+        {
+            printf("Redirections:\n");
+            t_redirect *redirect = node->redirects;
+            int redirect_count = 0;
+            while (redirect)
+            {
+                const char *type_str;
+                switch (redirect->type)
+                {
+                case ND_REDIRECT_IN:
+                    type_str = "INPUT <";
+                    break;
+                case ND_REDIRECT_OUT:
+                    type_str = "OUTPUT >";
+                    break;
+                case ND_REDIRECT_APPEND:
+                    type_str = "APPEND >>";
+                    break;
+                default:
+                    type_str = "UNKNOWN";
+                    break;
+                }
+                printf("  [%d] %s %s (fd: %d)\n", redirect_count, type_str, redirect->filename, redirect->fd);
+                redirect = redirect->next;
+                redirect_count++;
+            }
+        }
     }
     else
     {
@@ -588,6 +707,76 @@ void execute_pipe(t_node *pipe_node, int *stat_loc)
     *stat_loc = WEXITSTATUS(status2); // 右側のコマンドの終了ステータス
 }
 
+// リダイレクションを設定する関数
+int setup_redirections(t_redirect *redirects)
+{
+    t_redirect *redirect = redirects;
+
+    while (redirect)
+    {
+        int fd;
+
+        switch (redirect->type)
+        {
+        case ND_REDIRECT_IN:
+            fd = open(redirect->filename, O_RDONLY);
+            if (fd == -1)
+            {
+                perror(redirect->filename);
+                return -1;
+            }
+            if (dup2(fd, redirect->fd) == -1) // redirect->fdを使用
+            {
+                perror("dup2");
+                close(fd);
+                return -1;
+            }
+            close(fd);
+            break;
+
+        case ND_REDIRECT_OUT:
+            fd = open(redirect->filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd == -1)
+            {
+                perror(redirect->filename);
+                return -1;
+            }
+            if (dup2(fd, redirect->fd) == -1) // redirect->fdを使用
+            {
+                perror("dup2");
+                close(fd);
+                return -1;
+            }
+            close(fd);
+            break;
+
+        case ND_REDIRECT_APPEND:
+            fd = open(redirect->filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (fd == -1)
+            {
+                perror(redirect->filename);
+                return -1;
+            }
+            if (dup2(fd, redirect->fd) == -1) // redirect->fdを使用
+            {
+                perror("dup2");
+                close(fd);
+                return -1;
+            }
+            close(fd);
+            break;
+
+        default:
+            fprintf(stderr, "Unknown redirection type\n");
+            return -1;
+        }
+
+        redirect = redirect->next;
+    }
+
+    return 0;
+}
+
 // ノードを実行する関数
 void execute_node(t_node *node, int *stat_loc)
 {
@@ -607,6 +796,12 @@ void execute_node(t_node *node, int *stat_loc)
             pid_t pid = fork();
             if (pid == 0)
             {
+                // 子プロセスでリダイレクションを設定
+                if (node->redirects && setup_redirections(node->redirects) == -1)
+                {
+                    exit(1);
+                }
+
                 execve(path, argv, NULL);
                 perror("execve failed");
                 exit(1);

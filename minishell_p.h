@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/types.h>
+#include <fcntl.h> // ファイル操作用のフラグ定義
 
 #define SINGLE_QUOTE_CHAR '\''
 #define ERROR_TOKENIZE 258
@@ -46,6 +47,15 @@ typedef struct s_token
     struct s_token *next;
 } t_token;
 
+// Redirect structure
+typedef struct s_redirect
+{
+    int fd;           // ファイルディスクリプタ（標準入力:0, 標準出力:1, 標準エラー:2）
+    char *filename;   // リダイレクト先ファイル名
+    t_node_kind type; // リダイレクション種類
+    struct s_redirect *next;
+} t_redirect;
+
 // Node structure
 typedef struct s_node
 {
@@ -56,14 +66,6 @@ typedef struct s_node
     struct s_node *next; // 次のノード（シーケンスの場合）
     t_redirect *redirects;
 } t_node;
-
-typedef struct s_redirect
-{
-    int fd;           // ファイルディスクリプタ
-    char *filename;   // リダイレクト先ファイル名
-    t_node_kind type; // リダイレクション種類
-    struct s_redirect *next;
-} t_redirect;
 
 // void fatal_error(const char *msg);
 // bool at_eof(t_token *tok);
