@@ -1,47 +1,28 @@
-#include <string.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <sys/types.h>
-#define SINGLE_QUOTE_CHAR '\''
-#define ERROR_TOKENIZE 258
-#define PATH_MAX 4096
+#include "minishell_p.h"
 
-// typedef struct s_token t_token;
 bool syntax_error = false;
 
-enum e_token_kind
+void fatal_error(const char *msg)
 {
-    TK_WORD,
-    TK_RESERVED,
-    TK_OP,
-    TK_EOF,
-} typedef t_token_kind;
-
-struct s_token
-{
-    char *word;
-    t_token_kind kind;
-    struct s_token *next;
-} typedef t_token;
-
-enum e_node_kind
-{
-    ND_SIMPLE_CMD,
-} typedef t_node_kind;
-
-struct s_node
-{
-    t_token *args;
-    t_node_kind kind;
-    t_node *next;
-} typedef t_node;
+    perror(msg);
+    exit(1);
+}
 
 bool at_eof(t_token *tok) // トークンがkind:TK_EOFかどうかを確認
 {
     return (tok->kind == TK_EOF);
+}
+
+t_token *new_token(char *word, t_token_kind kind)
+{
+    t_token *tok;
+
+    tok = calloc(1, sizeof(*tok));
+    if (tok == NULL)
+        fatal_error("calloc");
+    tok->word = word;
+    tok->kind = kind;
+    return (tok);
 }
 
 t_node *new_node(t_node_kind kind) // nodeの種類を指定して新しいノードを作成
@@ -75,12 +56,6 @@ void append_tok(t_token **tokens, t_token *tok)
     append_tok(&(*tokens)->next, tok);
 }
 
-void fatal_error(const char *msg)
-{
-    perror(msg);
-    exit(1);
-}
-
 void assert_error(const char *msg)
 {
     fprintf(stderr, "Error: %s\n", msg);
@@ -94,18 +69,6 @@ void tokenize_error(const char *location, char **rest, char *line)
     while (*line && *line != '\n')
         line++;
     *rest = line;
-}
-
-t_token *new_token(char *word, t_token_kind kind)
-{
-    t_token *tok;
-
-    tok = calloc(1, sizeof(*tok));
-    if (tok == NULL)
-        fatal_error("calloc");
-    tok->word = word;
-    tok->kind = kind;
-    return (tok);
 }
 
 bool is_blank(char c)
@@ -425,99 +388,283 @@ void free_argv(char **argv)
     free(argv);
 }
 
-t_node *parse(t_token *tok)
+// 単純コマンドのみをパースする関数
+t_node *parse_simple_command(t_token **tok_ptr)
 {
-    t_node *node;
+    t_node *node = new_node(ND_SIMPLE_CMD);
+    t_token *tok = *tok_ptr;
 
-    node = new_node(ND_SIMPLE_CMD);
-    while (tok && !at_eof(tok))
+    while (tok && !at_eof(tok) && tok->kind == TK_WORD)
     {
-        if (tok->kind == TK_WORD)
-            append_tok(&node->args, tokdup(tok));
-        else
-            todo("Implement parser");
+        append_tok(&node->args, tokdup(tok));
         tok = tok->next;
     }
-    return (node);
+    *tok_ptr = tok;
+    return node;
 }
-void interpret(char *line, int *stat_loc) // ここ！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
-{
-    t_token *tok = tokenize(line);
-    t_node *node = parse(tok); // トークンをパースして構文木を生成
-    t_token *current = tok;
 
-    if (tok->kind == TK_EOF)
-        *stat_loc = 0; // 正常
-    else if (syntax_error)
-        *stat_loc = ERROR_TOKENIZE;
+// 演算子を含む複合コマンドをパースする関数（現在パイプのみ）
+t_node *parse(t_token *tok)
+{
+    t_node *left, *right, *op_node; // op_nodeはオペレーションのポインタ
+
+    // 左の、最初の単純コマンド：例　echo "hello"
+    left = parse_simple_command(&tok);
+
+    // オペレーションを探してる : tokトークンが、pipeなどのTK_OPにあたった場合
+    while (tok && !at_eof(tok) && tok->kind == TK_OP)
+    {
+        printf("Info: Processing operator '%s'\n", tok->word);
+
+        // オペレーションの種類に応じて、オペレーションノードを作成
+        if (strcmp(tok->word, "|") == 0)
+            op_node = new_node(ND_PIPE);
+        else
+        {
+            printf("Warning: Unsupported operator '%s'\n", tok->word);
+            tok = tok->next;
+            continue;
+        }
+        // オペレーションの次のトークンに進む
+        tok = tok->next;
+        // 右側のコマンド　例：wc -l
+        right = parse_simple_command(&tok);
+
+        // ↑で作ったパイプの左右にあるコマンドノードを、それぞれパイプの左と右に設定（echo "he" | wc -l） (op_node.left, op_node, op_node.right)
+        op_node->left = left;
+        op_node->right = right;
+        op_node->args = NULL;
+
+        left = op_node;
+    }
+    return left;
+}
+
+// デバッグ用関数：nodeの内容を表示
+void print_node_debug(t_node *node)
+{
+    if (!node)
+    {
+        printf("Node: NULL\n");
+        return;
+    }
+
+    printf("=== NODE DEBUG ===\n");
+    printf("Node kind: "); // 真ん中のノード
+    switch (node->kind)
+    {
+    case ND_SIMPLE_CMD:
+        printf("SIMPLE_CMD\n");
+        break;
+    case ND_PIPE: // ← この部分が抜けていました！
+        printf("PIPE\n");
+        break;
+    default:
+        printf("UNKNOWN (%d)\n", node->kind);
+        break;
+    }
+
+    if (node->kind == ND_SIMPLE_CMD)
+    {
+
+        printf("Arguments in this node:\n");
+        t_token *arg = node->args;
+        int arg_count = 0;
+        while (arg)
+        {
+            printf("  [%d] %s (kind: %s)\n",
+                   arg_count,
+                   arg->word ? arg->word : "NULL",
+                   arg->kind == TK_WORD ? "WORD" : arg->kind == TK_OP ? "OP"
+                                               : arg->kind == TK_EOF  ? "EOF"
+                                                                      : "UNKNOWN");
+            arg = arg->next;
+            arg_count++;
+        }
+        printf("Total arguments: %d\n", arg_count);
+    }
     else
     {
-        while (current)
+        printf("This is an operator node (no direct arguments)\n");
+
+        if (node->left)
         {
-            printf("Token: [%s], Kind: ", current->word ? current->word : "NULL");
-
-            switch (current->kind)
-            {
-            case TK_WORD:
-                printf("WORD\n");
-                break;
-            case TK_RESERVED:
-                printf("RESERVED\n");
-                break;
-            case TK_OP:
-                printf("OPERATOR\n");
-                break;
-            case TK_EOF:
-                printf("EOF\n");
-                break;
-            default:
-                printf("UNKNOWN\n");
-                break;
-            }
-
-            current = current->next;
+            printf("=== LEFT CHILD ===\n");
+            print_node_debug(node->left);
         }
-        // トークンをargv配列に変換(ここでnode->argvを使用する,トークンのグループ分け済ませておく)
-        char **argv = token_list_to_argv(tok);
-        // コマンドのパスを探す
+
+        if (node->right)
+        {
+            printf("=== RIGHT CHILD ===\n");
+            print_node_debug(node->right);
+        }
+    }
+    if (node->next)
+    {
+        printf("--- Next Node ---\n");
+        print_node_debug(node->next); // 再帰的に次のノードも表示
+    }
+
+    printf("==================\n\n");
+}
+
+// パイプを実行する関数
+void execute_pipe(t_node *pipe_node, int *stat_loc)
+{
+    int pipefd[2];
+    pid_t pid1, pid2;
+
+    if (pipe(pipefd) == -1)
+    {
+        perror("pipe");
+        *stat_loc = 1;
+        return;
+    }
+
+    // パイプの左側のコマンド
+    pid1 = fork();
+    if (pid1 == -1)
+    {
+        perror("fork");
+        *stat_loc = 1;
+        return;
+    }
+    else if (pid1 == 0)
+    {
+        // 子プロセス１：左側のコマンドを実行
+        close(pipefd[0]);               // 読み取り側を閉じる
+        dup2(pipefd[1], STDOUT_FILENO); // 標準出力をパイプの書き込み側に
+        close(pipefd[1]);
+
+        // 左側のコマンドを実行...1.pipe左側のトークンをargvに変換
+        char **left_argv = token_list_to_argv(pipe_node->left->args);
+        char *left_path = search_path(left_argv[0]);
+        if (left_path)
+        {
+            execve(left_path, left_argv, NULL);
+            perror("execve failed");
+        }
+        else
+            printf("Command not found: %s\n", left_argv[0]);
+        exit(1);
+    }
+
+    // 右側のコマンド（パイプの出力側）
+    pid2 = fork();
+    if (pid2 == -1)
+    {
+        perror("fork");
+        *stat_loc = 1;
+        return;
+    }
+    else if (pid2 == 0)
+    {
+        // 子プロセス２：右側のコマンドを実行
+        close(pipefd[1]);              // 書き込み側を閉じる
+        dup2(pipefd[0], STDIN_FILENO); // 標準入力をパイプの読み取り側に
+        close(pipefd[0]);
+
+        // 右側のコマンドを実行
+        char **right_argv = token_list_to_argv(pipe_node->right->args);
+        char *right_path = search_path(right_argv[0]);
+        if (right_path)
+        {
+            execve(right_path, right_argv, NULL);
+            perror("execve failed");
+        }
+        else
+            printf("Command not found: %s\n", right_argv[0]);
+        exit(1);
+    }
+
+    // 親プロセス：パイプ閉じて子プロセスを待つ
+    close(pipefd[0]);
+    close(pipefd[1]);
+
+    int status1, status2;
+    waitpid(pid1, &status1, 0);
+    waitpid(pid2, &status2, 0);
+
+    *stat_loc = WEXITSTATUS(status2); // 右側のコマンドの終了ステータス
+}
+
+// ノードを実行する関数
+void execute_node(t_node *node, int *stat_loc)
+{
+    if (!node)
+    {
+        *stat_loc = 0;
+        return;
+    }
+    switch (node->kind)
+    {
+    case ND_SIMPLE_CMD:
+    {
+        char **argv = token_list_to_argv(node->args);
         char *path = search_path(argv[0]);
         if (path)
         {
-            printf("Found executable at: %s\n", path);
-            // forkして子プロセスで実行
             pid_t pid = fork();
-            if (pid == -1)
+            if (pid == 0)
             {
-                perror("fork failed");
-                free(path);
-                *stat_loc = 1;
-            }
-            else if (pid == 0)
-            {
-                // 子プロセス：execveで実行
                 execve(path, argv, NULL);
-                // execveが失敗した場合のみここに到達
                 perror("execve failed");
                 exit(1);
             }
-            else
+            else if (pid > 0)
             {
-                // 親プロセス：子プロセスの終了を待つ
                 int child_status;
                 waitpid(pid, &child_status, 0);
                 *stat_loc = WEXITSTATUS(child_status);
+            }
+            else
+            {
+                perror("fork failed");
+                *stat_loc = 1;
             }
             free(path);
         }
         else
         {
-            printf("Executable '%s' not found in PATH.\n", argv[0]);
-            *stat_loc = 127; // command not found
+            printf("Command not found: %s\n", argv[0]);
+            *stat_loc = 127;
         }
-        // argv配列の解放
         free_argv(argv);
     }
-    while (tok) // フリー
+    break;
+
+    case ND_PIPE:
+        execute_pipe(node, stat_loc);
+        break;
+
+    default:
+        printf("Unsupported node type: %d\n", node->kind);
+        *stat_loc = 1;
+        break;
+    }
+}
+
+void interpret(char *line, int *stat_loc)
+{
+    t_token *tok = tokenize(line);
+    t_node *node = parse(tok);
+    // 例：echo "hello" | wc -l　なら、leftとrightにecho...とwc..をつけたPIPE属性のノードが返ってくる
+
+    if (tok->kind == TK_EOF)
+        *stat_loc = 0;
+    else if (syntax_error)
+        *stat_loc = ERROR_TOKENIZE;
+    else
+    {
+        printf("=== PARSING RESULT ===\n");
+        print_node_debug(node);
+
+        printf("=== EXECUTING COMMAND ===\n");
+        execute_node(node, stat_loc);
+    }
+
+    // メモリ解放
+    while (tok)
     {
         t_token *temp = tok;
         tok = tok->next;
